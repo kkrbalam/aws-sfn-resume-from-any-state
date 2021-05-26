@@ -1,9 +1,10 @@
 import argparse
 import json
+import time
 from datetime import datetime
 import boto3
 
-client = boto3.client('stepfunctions', region_name = "us-east-1")
+client = boto3.client('stepfunctions', region_name="us-east-1")
 
 
 def smArnFromExecutionArn(arn):
@@ -52,7 +53,7 @@ def parseFailureHistory(failedExecutionArn):
         except Exception as ex:
             raise ex
 
-    # Confrim that the execution actually failed, raise exception if it didn't fail
+    # Confirm that the execution actually failed, raise exception if it didn't fail
     try:
         failedEvents[0]['executionFailedEventDetails']
     except:
@@ -112,9 +113,9 @@ def parseFailureHistory(failedExecutionArn):
 
 def attachGoToState(failedStateName, stateMachineArn, failedStateMachineName):
     '''
-    Given a state machine arn and the name of a state in that state machine, create a new state machine 
+    Given a state machine arn and the name of a state in that state machine, create a new state machine
     that starts at a new choice state called the 'GoToState'. The "GoToState" will branch to the named
-    state, and send the input of the state machine to that state, when a variable called "resuming" is 
+    state, and send the input of the state machine to that state, when a variable called "resuming" is
     set to True
     Input   failedStateName - string with the name of the failed state
             stateMachineArn - string with the Arn of the state machine
@@ -129,7 +130,7 @@ def attachGoToState(failedStateName, stateMachineArn, failedStateMachineName):
     roleArn = response['roleArn']
     stateMachine = json.loads(response['definition'])
     # Create a name for the new state machine
-    newName = failedStateMachineName +  '-FR-' + datetime.now().strf("%Y%m%d")
+    newName = failedStateMachineName + '-FR-' + datetime.now().strf("%Y%m%d")
     # Get the StartAt state for the original state machine, because we will point the 'GoToState' to this state
     originalStartAt = stateMachine['StartAt']
     '''
@@ -164,7 +165,17 @@ def executeRerunStateMachineWithFailedInput(smArn: str, failedInput: str):
     smArn: arn of the rerun statemachine
     failedInput: string version of FailedInput
     """
-    pass
+
+    try:
+        failedInput["resuming"] = True
+        response = client.start_execution(
+            stateMachineArn=smArn,
+            name=smArn + "-" + datetime.now().strftime("%H%M%S"),
+            input=json.dumps(failedInput)
+        )
+        return response
+    except Exception as e:
+        raise (f"Exception occurred trying to trigger state machine with arn: {smArn}, error is {e}")
 
 
 def deleteRerunStateMachine(smArn: str):
@@ -172,8 +183,34 @@ def deleteRerunStateMachine(smArn: str):
     Delete the state machine after execution
     smArn: Rerun state machine arn
     """
-    pass
+    try:
+        client.delete_state_machine(
+            stateMachineArn=smArn
+        )
+    except:
+        raise ('Failed to delete state machine with GoToState')
 
+
+def get_state_machine_output(execution_arn: str) -> dict:
+    """
+    Checks running state machine's status and if successful returns output
+    :param region: region where step function is executing
+    :param execution_arn: execution arn of the state machine
+    """
+    try:
+        status = 'RUNNING'
+        response = {}
+        while status == 'RUNNING':
+            response = client.describe_execution(executionArn=execution_arn)
+            status = response["status"]
+            if status == 'RUNNING':
+                time.sleep(1)
+        if status != "SUCCEEDED":
+            raise Exception(f"step function execution for arn {execution_arn} {status}")
+        return response
+
+    except Exception as e:
+        raise (f"Failed to get status of step function, error is {e}")
 
 
 if __name__ == '__main__':
@@ -202,9 +239,8 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Failed to execute the rerun state machine with the error {e}")
     finally:
-        print("Delete new rerun workflow")
-        deleteRerunStateMachine(smArn)
-
-
-
-
+        execution_arn = execution_response["executionArn"]
+        status_response = get_state_machine_output(execution_arn)
+        if status_response["status"] == "SUCCEEDED":
+            print("Delete new rerun workflow")
+            deleteRerunStateMachine(execution_arn)
