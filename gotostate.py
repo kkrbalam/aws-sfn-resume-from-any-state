@@ -204,7 +204,7 @@ def get_state_machine_output(execution_arn: str) -> dict:
             response = client.describe_execution(executionArn=execution_arn)
             status = response["status"]
             if status == 'RUNNING':
-                time.sleep(1)
+                time.sleep(10)
         if status != "SUCCEEDED":
             raise Exception(f"step function execution for arn {execution_arn} {status}")
         return response
