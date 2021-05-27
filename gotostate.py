@@ -6,6 +6,9 @@ import boto3
 
 client = boto3.client('stepfunctions', region_name="us-east-1")
 
+class StateMachineFailedError(Exception):
+    """Base class for other exceptions"""
+    pass
 
 def smArnFromExecutionArn(arn):
     '''
@@ -130,7 +133,7 @@ def attachGoToState(failedStateName, stateMachineArn, failedStateMachineName):
     roleArn = response['roleArn']
     stateMachine = json.loads(response['definition'])
     # Create a name for the new state machine
-    newName = failedStateMachineName + '-FR-' + datetime.now().strf("%Y%m%d")
+    newName = failedStateMachineName + '-FR-' + datetime.now().strftime("%Y%m%d")
     # Get the StartAt state for the original state machine, because we will point the 'GoToState' to this state
     originalStartAt = stateMachine['StartAt']
     '''
@@ -167,11 +170,12 @@ def executeRerunStateMachineWithFailedInput(smArn: str, failedInput: str):
     """
 
     try:
-        failedInput["resuming"] = True
+        failedInputDict = json.loads(failedInput)
+        failedInputDict["resuming"] = True
         response = client.start_execution(
             stateMachineArn=smArn,
-            name=smArn + "-" + datetime.now().strftime("%H%M%S"),
-            input=json.dumps(failedInput)
+            name=smArn.split(":")[-1] + "-" + datetime.now().strftime("%H%M%S"),
+            input=json.dumps(failedInputDict)
         )
         return response
     except Exception as e:
@@ -191,7 +195,7 @@ def deleteRerunStateMachine(smArn: str):
         raise ('Failed to delete state machine with GoToState')
 
 
-def get_state_machine_output(execution_arn: str) -> dict:
+def getStateMachineOutput(executionArn: str) -> dict:
     """
     Checks running state machine's status and if successful returns output
     :param region: region where step function is executing
@@ -201,12 +205,14 @@ def get_state_machine_output(execution_arn: str) -> dict:
         status = 'RUNNING'
         response = {}
         while status == 'RUNNING':
-            response = client.describe_execution(executionArn=execution_arn)
+            response = client.describe_execution(executionArn=executionArn)
             status = response["status"]
             if status == 'RUNNING':
                 time.sleep(10)
+                print("State Machine is still running, sleeping for 10 secs")   
         if status != "SUCCEEDED":
-            raise Exception(f"step function execution for arn {execution_arn} {status}")
+            print(status)
+            raise StateMachineFailedError(f"step function execution for arn {executionArn} {status}")
         return response
 
     except Exception as e:
@@ -226,6 +232,7 @@ if __name__ == '__main__':
     smArn = smArnFromExecutionArn(args.failedExecutionArn)
     failedExecutionName = args.failedExecutionArn.split(":")[-1]
     newMachine_response = attachGoToState(failedSMInfo[0], smArn, failedExecutionName)
+
     print("New State Machine Arn: {}".format(newMachine_response['stateMachineArn']))
     print("Execution had failed at state: {} with Input: {}".format(failedSMInfo[0], failedSMInfo[1]))
 
@@ -235,12 +242,9 @@ if __name__ == '__main__':
 
     # Here you will call the functions to execute the state machine
     try:
-        execution_response = executeRerunStateMachineWithFailedInput(smArn, failedSMInfo[1])
-    except Exception as e:
-        print(f"Failed to execute the rerun state machine with the error {e}")
+        executionResponse = executeRerunStateMachineWithFailedInput(newMachine_response['stateMachineArn'], failedSMInfo[1])
+        executionArn = executionResponse["executionArn"]
+        statusResponse = getStateMachineOutput(executionArn)
     finally:
-        execution_arn = execution_response["executionArn"]
-        status_response = get_state_machine_output(execution_arn)
-        if status_response["status"] == "SUCCEEDED":
-            print("Delete new rerun workflow")
-            deleteRerunStateMachine(execution_arn)
+        print("Delete new rerun workflow")
+        deleteRerunStateMachine(newMachine_response['stateMachineArn'])
