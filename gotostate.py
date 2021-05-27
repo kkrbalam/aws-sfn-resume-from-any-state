@@ -1,10 +1,14 @@
 import argparse
 import json
-
+import time
+from datetime import datetime
 import boto3
 
-client = boto3.client('stepfunctions')
+client = boto3.client('stepfunctions', region_name="us-east-1")
 
+class StateMachineFailedError(Exception):
+    """Base class for other exceptions"""
+    pass
 
 def smArnFromExecutionArn(arn):
     '''
@@ -52,7 +56,7 @@ def parseFailureHistory(failedExecutionArn):
         except Exception as ex:
             raise ex
 
-    # Confrim that the execution actually failed, raise exception if it didn't fail
+    # Confirm that the execution actually failed, raise exception if it didn't fail
     try:
         failedEvents[0]['executionFailedEventDetails']
     except:
@@ -110,11 +114,11 @@ def parseFailureHistory(failedExecutionArn):
         currentEventId = currentEvent['previousEventId']
 
 
-def attachGoToState(failedStateName, stateMachineArn):
+def attachGoToState(failedStateName, stateMachineArn, failedStateMachineName):
     '''
-    Given a state machine arn and the name of a state in that state machine, create a new state machine 
+    Given a state machine arn and the name of a state in that state machine, create a new state machine
     that starts at a new choice state called the 'GoToState'. The "GoToState" will branch to the named
-    state, and send the input of the state machine to that state, when a variable called "resuming" is 
+    state, and send the input of the state machine to that state, when a variable called "resuming" is
     set to True
     Input   failedStateName - string with the name of the failed state
             stateMachineArn - string with the Arn of the state machine
@@ -129,7 +133,7 @@ def attachGoToState(failedStateName, stateMachineArn):
     roleArn = response['roleArn']
     stateMachine = json.loads(response['definition'])
     # Create a name for the new state machine
-    newName = response['name'] + '-with-GoToState'
+    newName = failedStateMachineName + '-FR-' + datetime.now().strftime("%Y%m%d")
     # Get the StartAt state for the original state machine, because we will point the 'GoToState' to this state
     originalStartAt = stateMachine['StartAt']
     '''
@@ -156,6 +160,65 @@ def attachGoToState(failedStateName, stateMachineArn):
     return response
 
 
+def executeRerunStateMachineWithFailedInput(smArn: str, failedInput: str):
+    """
+    This function will execute the newly created rerun state machine with failed input data
+    Remember to add resuming=True to failed input
+    Args:
+    smArn: arn of the rerun statemachine
+    failedInput: string version of FailedInput
+    """
+
+    try:
+        failedInputDict = json.loads(failedInput)
+        failedInputDict["resuming"] = True
+        response = client.start_execution(
+            stateMachineArn=smArn,
+            name=smArn.split(":")[-1] + "-" + datetime.now().strftime("%H%M%S"),
+            input=json.dumps(failedInputDict)
+        )
+        return response
+    except Exception as e:
+        raise (f"Exception occurred trying to trigger state machine with arn: {smArn}, error is {e}")
+
+
+def deleteRerunStateMachine(smArn: str):
+    """
+    Delete the state machine after execution
+    smArn: Rerun state machine arn
+    """
+    try:
+        client.delete_state_machine(
+            stateMachineArn=smArn
+        )
+    except:
+        raise ('Failed to delete state machine with GoToState')
+
+
+def getStateMachineOutput(executionArn: str) -> dict:
+    """
+    Checks running state machine's status and if successful returns output
+    :param region: region where step function is executing
+    :param execution_arn: execution arn of the state machine
+    """
+    try:
+        status = 'RUNNING'
+        response = {}
+        while status == 'RUNNING':
+            response = client.describe_execution(executionArn=executionArn)
+            status = response["status"]
+            if status == 'RUNNING':
+                time.sleep(10)
+                print("State Machine is still running, sleeping for 10 secs")   
+        if status != "SUCCEEDED":
+            print(status)
+            raise StateMachineFailedError(f"step function execution for arn {executionArn} {status}")
+        return response
+
+    except Exception as e:
+        raise (f"Failed to get status of step function, error is {e}")
+
+
 if __name__ == '__main__':
     '''
     Main
@@ -167,6 +230,21 @@ if __name__ == '__main__':
     args = parser.parse_args()
     failedSMInfo = parseFailureHistory(args.failedExecutionArn)
     smArn = smArnFromExecutionArn(args.failedExecutionArn)
-    newMachine = attachGoToState(failedSMInfo[0], smArn)
-    print("New State Machine Arn: {}".format(newMachine['stateMachineArn']))
+    failedExecutionName = args.failedExecutionArn.split(":")[-1]
+    newMachine_response = attachGoToState(failedSMInfo[0], smArn, failedExecutionName)
+
+    print("New State Machine Arn: {}".format(newMachine_response['stateMachineArn']))
     print("Execution had failed at state: {} with Input: {}".format(failedSMInfo[0], failedSMInfo[1]))
+
+    print("------------------------------------------------------------------------------------")
+    print("-------------------- Now Executing SM from failed state ----------------------------")
+    print("------------------------------------------------------------------------------------")
+
+    # Here you will call the functions to execute the state machine
+    try:
+        executionResponse = executeRerunStateMachineWithFailedInput(newMachine_response['stateMachineArn'], failedSMInfo[1])
+        executionArn = executionResponse["executionArn"]
+        statusResponse = getStateMachineOutput(executionArn)
+    finally:
+        print("Delete new rerun workflow")
+        deleteRerunStateMachine(newMachine_response['stateMachineArn'])
