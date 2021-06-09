@@ -107,7 +107,7 @@ def parseFailureHistory(failedExecutionArn):
         the first event with 'type'='ParallelStateEntered', and return the name of the state
         '''
         if currentEvent['type'] == 'ParallelStateEntered' and failedAtParallelState:
-            failedState = failedState = currentEvent['stateEnteredEventDetails']['name']
+            failedState = currentEvent['stateEnteredEventDetails']['name']
             failedInput = currentEvent['stateEnteredEventDetails']['input']
             return (failedState, failedInput)
         # Update the id for the next execution of the loop
@@ -245,6 +245,7 @@ if __name__ == '__main__':
         executionResponse = executeRerunStateMachineWithFailedInput(newMachine_response['stateMachineArn'], failedSMInfo[1])
         executionArn = executionResponse["executionArn"]
         statusResponse = getStateMachineOutput(executionArn)
-    finally:
         print("Delete new rerun workflow")
         deleteRerunStateMachine(newMachine_response['stateMachineArn'])
+    except:
+        print("Step Function execution failed new rerun workflow!!!!")
